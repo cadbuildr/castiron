@@ -248,6 +248,21 @@ def _concat_solids(solids):
     return ist.solid_from_mesh(verts, tris)
 
 
+def _circle_of_loop(loop, rel_tol=1e-6):
+    """If a 2D loop is a discretized circle, return (center, radius)."""
+    if len(loop) < 8:
+        return None
+    cx = sum(p[0] for p in loop) / len(loop)
+    cy = sum(p[1] for p in loop) / len(loop)
+    dists = [math.hypot(p[0] - cx, p[1] - cy) for p in loop]
+    r = sum(dists) / len(dists)
+    if r <= 0:
+        return None
+    if max(abs(d - r) for d in dists) > rel_tol * r:
+        return None
+    return (cx, cy), r
+
+
 def _extrude_region(placement, outer, holes, start, end):
     ow = _loop_to_wire(placement, outer, z=start)
     if holes:
@@ -255,7 +270,19 @@ def _extrude_region(placement, outer, holes, start, end):
     else:
         face = ist.make_face(ow)
     vec = ist.Pnt(*_vscale(placement.normal(), end - start))
-    return ist.make_prism(face, vec)
+    solid = ist.make_prism(face, vec)
+    # Circular loops sweep exact cylindrical walls: stamp provenance so STEP
+    # export can emit a real CYLINDRICAL_SURFACE (bosses and drilled holes).
+    stamp = getattr(solid, "add_cylinder_hint", None)  # ironstream >= 0.2
+    if stamp is not None:
+        normal = placement.normal()
+        for loop in [outer, *holes]:
+            circ = _circle_of_loop(loop)
+            if circ:
+                (cx, cy), r = circ
+                world = placement.to_world(cx, cy, start)
+                stamp(ist.Pnt(*world), ist.Pnt(*normal), r)
+    return solid
 
 
 def _extrusion(ctx, node):

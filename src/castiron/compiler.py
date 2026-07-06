@@ -123,7 +123,12 @@ def _write_solid(solid: "ist.Solid", fmt: str, path: Path, name: str) -> None:
     if fmt == "stl":
         path.write_bytes(ist.write_binary_stl(mesh))
     elif fmt == "step":
-        path.write_text(ist.write_step(mesh, name))
+        if hasattr(ist, "write_step_analytic"):
+            # analytic B-rep faces (real cylinders/spheres) where the solid's
+            # surface provenance allows; needs ironstream >= 0.2
+            path.write_text(ist.write_step_analytic(solid, name))
+        else:
+            path.write_text(ist.write_step(mesh, name))
     elif fmt == "json":
         path.write_text(json.dumps({
             "vertices": mesh.vertices_flat(),

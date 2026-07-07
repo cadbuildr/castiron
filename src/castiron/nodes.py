@@ -318,12 +318,48 @@ def _bbox(solid):
     return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
 
 
+def _clip_profile_to_axis(pts3d, loc, perp):
+    """Clip a revolution profile to one side of its axis.
+
+    A profile that straddles the axis (e.g. an ellipse centred on it) would be
+    double-covered by a 360° revolution and cancel to ~zero volume. We keep the
+    dominant half-plane (normal ``perp``, through ``loc``) via Sutherland-
+    Hodgman; edges crossing the axis get an intersection point (radius 0 on the
+    axis). A profile already on one side is returned essentially unchanged.
+    """
+    def sd(p):
+        return sum((p[k] - loc[k]) * perp[k] for k in range(3))
+
+    ds = [sd(p) for p in pts3d]
+    pos = sum(d for d in ds if d > 0)
+    neg = sum(-d for d in ds if d < 0)
+    if min(pos, neg) < 1e-9:
+        return pts3d  # already one-sided
+    keep_pos = pos >= neg
+    inside = (lambda d: d >= -1e-9) if keep_pos else (lambda d: d <= 1e-9)
+    n = len(pts3d)
+    out = []
+    for i in range(n):
+        a, da = pts3d[i], ds[i]
+        b, db = pts3d[(i + 1) % n], ds[(i + 1) % n]
+        if inside(da):
+            out.append(a)
+        if (da > 0) != (db > 0) and abs(da - db) > 1e-12:
+            t = da / (da - db)
+            out.append(tuple(a[k] + (b[k] - a[k]) * t for k in range(3)))
+    return out
+
+
 def _lathe(ctx, node, segments=64):
     placement: Placement = ctx.get(node, "sketch")
     loop = _shapes(ctx, node, "shape")[0]
     _, loc, direction = ctx.get(node, "axis")
     cut = bool(ctx.get(node, "cut"))
-    wire = _loop_to_wire(placement, loop, 0.0)
+    pts3d = [placement.to_world(x, y, 0.0) for (x, y) in loop]
+    # in-plane direction perpendicular to the axis (the "radius" direction)
+    perp = _norm(_cross(_norm(direction), placement.normal()))
+    pts3d = _clip_profile_to_axis(pts3d, loc, perp)
+    wire = ist.make_polygon([ist.Pnt(*p) for p in pts3d])
     axis = ist.Ax1(ist.Pnt(*loc), ist.Pnt(*direction))
     solid = ist.make_revol(wire, axis, 2 * math.pi, ist.MeshParams(segments, segments))
     return OpResult(solid, cut)
@@ -658,7 +694,7 @@ def _sweep(ctx, node):
     return OpResult(sweep_solid(profile, path), cut)
 
 
-def _helix3d(ctx, node, seg_per_turn=32):
+def _helix3d(ctx, node, seg_per_turn=32, max_points=400):
     cx, cy, cz = ctx.get(node, "center")
     axis = _norm(ctx.get(node, "dir"))
     height = float(ctx.get(node, "height"))
@@ -669,7 +705,10 @@ def _helix3d(ctx, node, seg_per_turn=32):
     e1 = _norm(_cross(ref, axis))
     e2 = _norm(_cross(axis, e1))
     turns = height / pitch if pitch else 1.0
-    npts = max(2, int(turns * seg_per_turn))
+    # Cap the total point count: a many-turn helix drives a Sweep that is then
+    # boolean'd, and the BSP cost is superlinear in triangle count. This keeps a
+    # 10-turn thread from exploding to tens of thousands of triangles.
+    npts = max(2, min(max_points, int(turns * seg_per_turn)))
     pts = []
     for i in range(npts + 1):
         t = turns * i / npts

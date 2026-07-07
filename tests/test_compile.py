@@ -109,6 +109,28 @@ def test_fixture_corpus(fixture, tmp_path):
     assert all(Path(p["file"]).stat().st_size > 80 for p in m.parts)
 
 
+def test_lathe_profile_straddling_axis():
+    """A profile centred on the revolution axis (e.g. an ellipse) must be
+    clipped to one side, else a 360° revolution double-covers it and the volume
+    cancels to ~0. Regression for the ellipsoid example."""
+    pytest.importorskip("cadbuildr.foundation")
+    import math
+
+    from cadbuildr.foundation import Axis, Ellipse, Line, Part, Point, Sketch
+    from cadbuildr.foundation.gen.models.lathe import Lathe
+
+    class Ellipsoid(Part):
+        def __init__(self, a=10, b=30):
+            s = Sketch(self.xy())
+            ell = Ellipse(s.origin, a, b)          # semi-axes a (x), b (y)
+            axis = Axis(Line(Point(s, 0, 0), Point(s, 1, 0)))  # X axis through centre
+            self.add_operation(Lathe(ell, axis))
+
+    m = compile(Ellipsoid(10, 30), format="stl", out_dir="/tmp/castiron_ellipsoid_test")
+    # analytic ellipsoid volume 4/3 pi a b b = 4/3 pi 10 30 30 ~= 37699
+    assert m.parts[0]["volume"] == pytest.approx(4 / 3 * math.pi * 10 * 30 * 30, rel=0.05)
+
+
 def test_node_complete_against_foundation():
     """Every node type foundation can serialize has a castiron handler.
 

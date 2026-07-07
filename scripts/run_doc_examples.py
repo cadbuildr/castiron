@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Path to the foundation_ex package (CADbuildr monorepo,
@@ -104,6 +105,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--examples-dir", default=DEFAULT_EXAMPLES_DIR)
     ap.add_argument("--only", help="substring filter on example path")
+    ap.add_argument("--timeout", type=float, default=TIMEOUT_S,
+                    help="per-example wall-clock limit in seconds (killed past it)")
     ap.add_argument("--child", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
@@ -122,20 +125,31 @@ def main() -> int:
         filter(None, [str(examples_dir.parent), env.get("PYTHONPATH", "")])
     )
 
-    ok, no_show, failed = [], [], []
+    ok, no_show, failed, slow = [], [], [], []
     for f in files:
         rel = str(f.relative_to(examples_dir))
-        proc = subprocess.run(
-            [sys.executable, __file__, "--child", str(f)],
-            capture_output=True, text=True, env=env, timeout=TIMEOUT_S,
-        )
+        t0 = time.time()
+        try:
+            proc = subprocess.run(
+                [sys.executable, __file__, "--child", str(f)],
+                capture_output=True, text=True, env=env, timeout=args.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            # SIGKILLs the child (interrupts even native code) and keeps going,
+            # so one slow example can't mask the rest.
+            dt = time.time() - t0
+            print(f"SLOW     {rel:55} >{args.timeout}s (killed)")
+            slow.append(rel)
+            continue
+        dt = time.time() - t0
         line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
         if proc.returncode == 0 and line.startswith("{"):
             data = json.loads(line)
             if data["status"] == "ok":
                 vols = [round(p["volume"]) for s in data["shows"] for p in s["parts"]]
-                print(f"OK       {rel:55} shows={len(data['shows'])} vols={vols}")
-                ok.append(rel)
+                flag = "  ⚠slow" if dt > 20 else ""
+                print(f"OK       {rel:55} {dt:5.1f}s vols={vols}{flag}")
+                ok.append((rel, dt))
             else:
                 print(f"NO-SHOW  {rel:55} (module has no __main__ show)")
                 no_show.append(rel)
@@ -145,10 +159,17 @@ def main() -> int:
             print(f"FAIL     {rel:55} {msg}")
             failed.append((rel, msg))
 
-    print(f"\n=== {len(ok)} ok, {len(no_show)} no-show, {len(failed)} failed"
-          f" / {len(files)} total ===")
+    print(f"\n=== {len(ok)} ok, {len(no_show)} no-show, {len(slow)} slow, "
+          f"{len(failed)} failed / {len(files)} total ===")
     for rel, msg in failed:
         print(f"  FAIL {rel}: {msg}")
+    for rel in slow:
+        print(f"  SLOW {rel}")
+    over = sorted(((dt, rel) for rel, dt in ok if dt > 10), reverse=True)
+    if over:
+        print("  slowest OK:")
+        for dt, rel in over[:10]:
+            print(f"    {dt:6.1f}s  {rel}")
     return 1 if failed else 0
 
 

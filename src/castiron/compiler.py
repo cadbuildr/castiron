@@ -22,10 +22,11 @@ from typing import Any
 import ironstream as ist
 
 from .dag import Dag, DagNode
+from .dxf import build_dxf
 from .nodes import HANDLERS, OpResult, PartResult, UnsupportedNodeError
 
-FORMATS = {"stl", "step", "json"}
-_EXT = {"stl": "stl", "step": "step", "json": "json"}
+FORMATS = {"stl", "step", "json", "dxf"}
+_EXT = {"stl": "stl", "step": "step", "json": "json", "dxf": "dxf"}
 
 
 @dataclass
@@ -139,6 +140,34 @@ def _write_solid(solid: "ist.Solid", fmt: str, path: Path, name: str) -> None:
         raise ValueError(fmt)
 
 
+def _compile_dxf(compiler, dag, base: Path, name, manifest) -> "BuildManifest":
+    """Write the design's 2D drawing to a DXF file.
+
+    DXF is for 2D profiles / flat patterns, so a design that produced a solid is
+    out of scope — steer the caller to STL/STEP instead.
+    """
+    try:
+        solids = _as_parts(compiler.result)
+    except NothingToBuildError:
+        solids = []
+    if solids:
+        raise NothingToBuildError(
+            "DXF export is for 2D sketches and flat patterns; this design "
+            "produced a solid — use format='stl' or 'step'."
+        )
+
+    doc = build_dxf(compiler)
+    if doc.count == 0:
+        raise NothingToBuildError("no 2D geometry found to export as DXF")
+
+    pname = name or "sketch"
+    fp = base / f"{pname}.dxf"
+    fp.write_text(doc.render())
+    manifest.parts.append({"name": pname, "file": str(fp), "entities": doc.count})
+    (base / "manifest.json").write_text(json.dumps(asdict(manifest), indent=2))
+    return manifest
+
+
 def compile_meshes(obj: Any) -> list[dict[str, Any]]:
     """Compile a foundation part/assembly (or DAG) to in-memory mesh data.
 
@@ -187,9 +216,6 @@ def compile(
     dag_dict = _to_dag_dict(obj)
     dag = Dag.from_compiler_input(dag_dict)
     compiler = Compiler(dag).run()
-    parts = _as_parts(compiler.result)
-    if not parts:
-        raise NothingToBuildError("design produced no solid geometry to export")
 
     dag_hash = _dag_hash(dag_dict)
     base = Path(out_dir) / dag_hash[:16]
@@ -202,6 +228,13 @@ def compile(
         format=format,
         out_dir=str(base),
     )
+
+    if format == "dxf":
+        return _compile_dxf(compiler, dag, base, name, manifest)
+
+    parts = _as_parts(compiler.result)
+    if not parts:
+        raise NothingToBuildError("design produced no solid geometry to export")
 
     single = len(parts) == 1
     used: dict[str, int] = {}

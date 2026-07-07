@@ -208,6 +208,35 @@ def test_svg_text_renders_glyphs():
     assert len(loops) >= 5
 
 
+def test_dxf_export_sketch(tmp_path):
+    """A 2D sketch (square + circle) exports to a DXF whose entities are a real
+    CIRCLE plus a closed polyline — the shapes the user drew, not their
+    constituent edge primitives."""
+    pytest.importorskip("cadbuildr.foundation")
+    from cadbuildr.foundation import Circle, Part, Sketch, Square
+
+    comp = Part()
+    s = Sketch(comp.xy())
+    Square.from_center_and_side(s.origin, 30)
+    Circle(s.origin, 15)
+
+    m = compile(s, format="dxf", out_dir=str(tmp_path), name="cs")
+    txt = Path(m.files[0]).read_text()
+    assert m.parts[0]["entities"] == 2          # one square loop + one circle
+    assert txt.count("\nCIRCLE\n") == 1
+    assert txt.count("\nLWPOLYLINE\n") == 1     # square, not its 4 edges
+    assert "40\n15.000000" in txt               # circle radius preserved
+    assert txt.rstrip().endswith("EOF")
+
+
+def test_dxf_rejects_solid(tmp_path):
+    """DXF is for 2D drawings; a solid design should steer the caller to STL/STEP."""
+    from castiron.compiler import NothingToBuildError
+
+    with pytest.raises(NothingToBuildError, match="2D sketch"):
+        compile(_cube_dag(10.0), format="dxf", out_dir=str(tmp_path))
+
+
 def test_json_format(tmp_path):
     m = compile(_cube_dag(10.0), format="json", out_dir=str(tmp_path))
     data = json.loads(Path(m.files[0]).read_text())

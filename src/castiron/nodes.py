@@ -853,14 +853,29 @@ def _ignore(ctx, node):
 def _part(ctx, node):
     ops = [op for op in ctx.get_list(node, "operations") if isinstance(op, OpResult)]
     solid = None
-    for op in ops:
+    i = 0
+    n = len(ops)
+    while i < n:
+        cut = ops[i].cut
+        # Batch a run of consecutive same-direction ops into ONE boolean:
+        # A ∪ (B ∪ C) and A \ (B ∪ C) both equal the sequential form, but the
+        # union of the tools is a cheap concat when they're disjoint (the common
+        # drilled-holes / bolt-pattern case), so this collapses N BSP passes to
+        # one and avoids the mesh-fragmentation blowup.
+        j = i
+        tools = []
+        while j < n and ops[j].cut == cut:
+            tools.append(ops[j].solid)
+            j += 1
+        combined = tools[0] if len(tools) == 1 else ist.fuse_all(tools)
         if solid is None:
-            if not op.cut:
-                solid = op.solid
-        elif op.cut:
-            solid = ist.cut(solid, op.solid)
+            if not cut:
+                solid = combined  # leading cuts with no base are ignored
+        elif cut:
+            solid = ist.cut(solid, combined)
         else:
-            solid = ist.fuse(solid, op.solid)
+            solid = ist.fuse(solid, combined)
+        i = j
     if solid is None:
         return None  # empty part (e.g. only a BoundingBox); skipped by assemblies
     name = ctx.get_opt(node, "name") or "part"

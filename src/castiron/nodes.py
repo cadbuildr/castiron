@@ -285,6 +285,34 @@ def _extrude_region(placement, outer, holes, start, end):
     return solid
 
 
+def _sketch_rotation_trsf(placement):
+    """The sketch frame's rotation as a Trsf about the origin (None if identity).
+    Maps sketch-local axes to world, so rotating a +Z-built primitive by it
+    aligns the primitive's axis with the sketch normal."""
+    w, x, y, z = placement.quaternion
+    norm = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    s = math.sqrt(max(0.0, 1.0 - w * w))
+    if s < 1e-9:
+        return None  # ~identity
+    angle = 2.0 * math.acos(max(-1.0, min(1.0, w)))
+    axis = ist.Ax1(ist.Pnt(0.0, 0.0, 0.0), ist.Pnt(x / s, y / s, z / s))
+    return ist.Trsf.rotation(axis, angle)
+
+
+def _analytic_cone(placement, ccx, ccy, r1, r2, start, h):
+    """An exact cone/frustum via make_cone (which stamps a Cone hint, so STEP
+    emits a real CONICAL_SURFACE), placed on the sketch: built along +Z from the
+    origin (r1 at the base, r2 at height h), rotated into the sketch frame, then
+    moved so its base sits at the circle centre."""
+    solid = ist.make_cone(r1, r2, h, ist.MeshParams(64, 1))
+    base_center = placement.to_world(ccx, ccy, start)
+    trans = ist.Trsf.translation(ist.Pnt(*base_center))
+    rot = _sketch_rotation_trsf(placement)
+    T = rot.then(trans) if rot is not None else trans
+    return ist.transform(solid, T)
+
+
 def _tapered_extrude(placement, loop, start, end, taper):
     """A tapered (draft) extrusion: the profile scales linearly from 1 at the
     base to ``1 - taper`` at the top, about its own centroid — matching the
@@ -292,6 +320,13 @@ def _tapered_extrude(placement, loop, start, end, taper):
     circular profile therefore becomes a true cone/frustum (e.g. foundation's
     ``Cone`` compiles to a tapered circular extrusion)."""
     end_factor = 1.0 - taper
+    # A circular profile drafts to an exact cone — use the analytic primitive
+    # so both the geometry and the STEP face are exact.
+    circ = _circle_of_loop(loop)
+    if circ is not None and end_factor >= 0.0 and end > start:
+        (ccx, ccy), r1 = circ
+        return _analytic_cone(placement, ccx, ccy, r1, r1 * end_factor, start, end - start)
+    # general profile: loft the base to a centroid-scaled top.
     cx = sum(p[0] for p in loop) / len(loop)
     cy = sum(p[1] for p in loop) / len(loop)
     base = [placement.to_world(x, y, start) for (x, y) in loop]

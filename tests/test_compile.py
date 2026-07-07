@@ -228,6 +228,11 @@ def test_tapered_extrusion_is_a_frustum(tmp_path):
     assert m.parts[0]["volume"] == pytest.approx(frustum, rel=2e-3)
     # a straight cylinder would be pi*100*15 = 4712 — guard against regressing.
     assert m.parts[0]["volume"] < 0.6 * math.pi * 100 * 15
+    # a circular taper is an exact cone → STEP carries a real CONICAL_SURFACE.
+    s = compile(Frustum(), format="step", out_dir=str(tmp_path))
+    step = Path(s.files[0]).read_text()
+    assert "CONICAL_SURFACE" in step
+    assert "CYLINDRICAL_SURFACE" not in step
 
 
 def test_dxf_export_sketch(tmp_path):

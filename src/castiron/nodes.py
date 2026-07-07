@@ -285,12 +285,30 @@ def _extrude_region(placement, outer, holes, start, end):
     return solid
 
 
+def _tapered_extrude(placement, loop, start, end, taper):
+    """A tapered (draft) extrusion: the profile scales linearly from 1 at the
+    base to ``1 - taper`` at the top, about its own centroid — matching the
+    reference kernel's linear extrusion profile (``endFactor = 1 - taper``). A
+    circular profile therefore becomes a true cone/frustum (e.g. foundation's
+    ``Cone`` compiles to a tapered circular extrusion)."""
+    end_factor = 1.0 - taper
+    cx = sum(p[0] for p in loop) / len(loop)
+    cy = sum(p[1] for p in loop) / len(loop)
+    base = [placement.to_world(x, y, start) for (x, y) in loop]
+    top = [
+        placement.to_world(cx + (x - cx) * end_factor, cy + (y - cy) * end_factor, end)
+        for (x, y) in loop
+    ]
+    return loft_solid([base, top])
+
+
 def _extrusion(ctx, node):
     shapes = _shapes(ctx, node, "shape")
     placement: Placement = ctx.get(node, "sketch")
     start = float(ctx.get(node, "start"))
     end = float(ctx.get(node, "end"))
     cut = bool(ctx.get(node, "cut"))
+    taper = float(ctx.get_opt(node, "taper", 0.0) or 0.0)
 
     if len(shapes) == 1 and isinstance(shapes[0], Loops):
         # multi-loop region (e.g. SVG art or text): islands + holes. Regions
@@ -307,7 +325,14 @@ def _extrusion(ctx, node):
             raise UnsupportedNodeError("extrusion region had no usable loops")
         return OpResult(_concat_solids(solids), cut)
 
-    solid = _extrude_region(placement, shapes[0], shapes[1:], start, end)
+    outer, holes = shapes[0], shapes[1:]
+    # A tapered extrusion of a single loop drafts the walls (a cone when the
+    # profile is a circle). Holes + taper is a rarer case left to the straight
+    # path for now.
+    if taper and not holes:
+        return OpResult(_tapered_extrude(placement, outer, start, end, taper), cut)
+
+    solid = _extrude_region(placement, outer, holes, start, end)
     return OpResult(solid, cut)
 
 

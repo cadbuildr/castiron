@@ -208,6 +208,28 @@ def test_svg_text_renders_glyphs():
     assert len(loops) >= 5
 
 
+def test_tapered_extrusion_is_a_frustum(tmp_path):
+    """A tapered circular extrusion must draft to a cone/frustum, not stay a
+    straight cylinder. foundation's Cone compiles to Extrusion(circle, taper);
+    endFactor = 1 - taper, so taper 0.8 takes r=10 down to r=2."""
+    pytest.importorskip("cadbuildr.foundation")
+    from cadbuildr.foundation import Circle, Part, Sketch
+    from cadbuildr.foundation.gen.models.extrusion import Extrusion
+
+    class Frustum(Part):
+        def __init__(self):
+            s = Sketch(self.xy())
+            circle = Circle(s.origin, 10)
+            self.add_operation(Extrusion(circle, 15, taper=0.8))
+
+    m = compile(Frustum(), format="stl", out_dir=str(tmp_path))
+    h, r1, r2 = 15.0, 10.0, 2.0
+    frustum = math.pi * h / 3 * (r1 * r1 + r1 * r2 + r2 * r2)
+    assert m.parts[0]["volume"] == pytest.approx(frustum, rel=2e-3)
+    # a straight cylinder would be pi*100*15 = 4712 — guard against regressing.
+    assert m.parts[0]["volume"] < 0.6 * math.pi * 100 * 15
+
+
 def test_dxf_export_sketch(tmp_path):
     """A 2D sketch (square + circle) exports to a DXF whose entities are a real
     CIRCLE plus a closed polyline — the shapes the user drew, not their

@@ -131,12 +131,32 @@ def test_lathe_profile_straddling_axis():
     assert m.parts[0]["volume"] == pytest.approx(4 / 3 * math.pi * 10 * 30 * 30, rel=0.05)
 
 
+# Foundation node types castiron cannot compile yet (real geometry gaps, as of
+# cadbuildr-foundation 0.2.20). A design using one raises UnsupportedNodeError.
+# Assembly-only / kinematic nodes are NOT here: they are intentionally ignored
+# (see castiron.nodes._ASSEMBLY_ONLY).
+KNOWN_GAPS = {
+    # patterns + body moves
+    "LinearPattern", "PolarPattern", "MoveBody",
+    # booleans between bodies + part modification through a connection
+    "BooleanOperation", "PartModifier",
+    # surface modelling
+    "PlanarSurface", "ExtrudedSurface", "RevolvedSurface", "RuledSurface", "OffsetFace",
+    # face-projected features + text along a path
+    "Emboss", "Wrap", "TextOnPath",
+    # sheet metal
+    "Rip", "SheetMetalFromSolid", "SheetMetalCut", "SheetMetalBead",
+    "SheetMetalDimple", "SheetMetalExtrudedHole",
+}
+
+
 def test_node_complete_against_foundation():
     """Every node type foundation can serialize has a castiron handler.
 
     The universe is the class set of cadbuildr.foundation.gen.models — the
     generated schema models. New foundation node types fail this test loudly
-    until a handler (or explicit enum/ignore classification) exists.
+    until a handler (or explicit enum/ignore classification) exists; the
+    current real gaps are listed in KNOWN_GAPS.
     """
     import inspect
 
@@ -149,8 +169,12 @@ def test_node_complete_against_foundation():
         if inspect.isclass(obj := getattr(models, n))
         and obj.__module__.startswith("cadbuildr.foundation.gen.models")
     }
-    missing = sorted(names - set(HANDLERS))
-    assert not missing, f"foundation node types without castiron handler: {missing}"
+    missing = names - set(HANDLERS)
+    unexpected = sorted(missing - KNOWN_GAPS)
+    assert not unexpected, f"foundation node types without castiron handler: {unexpected}"
+    # A gap that gained a handler must leave KNOWN_GAPS (keeps the list honest).
+    filled = sorted(KNOWN_GAPS & set(HANDLERS))
+    assert not filled, f"remove from KNOWN_GAPS, they have handlers now: {filled}"
 
 
 @pytest.mark.parametrize("fixture", ["loft_basic", "sweep_spline", "multi_section_sweep", "sweep_twist"])
@@ -269,3 +293,35 @@ def test_json_format(tmp_path):
     data = json.loads(Path(m.files[0]).read_text())
     assert data["vertices"] and data["triangles"]
     assert data["volume"] == pytest.approx(1000.0)
+
+
+def test_assembly_with_anchors_and_joints(tmp_path):
+    """Anchors and joints are assembly-only: castiron ignores them and still
+    compiles every part (here two 10 mm cubes, the second hung on a revolute
+    joint)."""
+    pytest.importorskip("cadbuildr.foundation")
+    from cadbuildr.foundation import (
+        Assembly, BoolParameter, FloatParameter, Part, RevoluteJoint, Sketch,
+        Square, make_anchor,
+    )
+
+    def cube(name):
+        p = Part(name=name)
+        s = Sketch(p.xy())
+        p.extrude(Square.from_center_and_side(s.origin, 10), 10)
+        p.add_anchor(make_anchor("top", (0, 0, 10)))
+        p.add_anchor(make_anchor("bottom", (0, 0, 0), z_down=True))
+        return p
+
+    a, b = cube("a"), cube("b")
+    asm = Assembly()
+    asm.ground(a.anchor("bottom"))
+    asm.add_joint(RevoluteJoint(
+        parent_anchor=a.anchor("top"), child_anchor=b.anchor("bottom"),
+        angle=FloatParameter(value=30.0), flip=BoolParameter(value=False),
+    ))
+
+    m = compile(asm, format="stl", out_dir=str(tmp_path))
+    assert len(m.parts) == 2
+    for part in m.parts:
+        assert part["volume"] == pytest.approx(1000.0, rel=1e-6)

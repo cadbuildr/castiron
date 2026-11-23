@@ -793,11 +793,11 @@ def _result(ctx, node):
 
 # All classes in cadbuildr.foundation.gen.models whose value is their `result`.
 _RESULT_NODES = [
-    "ArcFromTwoPointsAndRadius", "Box", "CenterArc", "Cone", "ConvexHull",
+    "ArcFromTwoPointsAndRadius", "Box", "CenterArc", "ClearanceHole", "Cone", "ConvexHull",
     "CounterBoreHole", "CounterSinkHole", "Cylinder", "EllipticalCenterArc",
     "FilletPolyline", "Helix2D", "JernArc", "Polyline", "RadiusArc",
     "RectangleFrom2Points", "RectangleFromCenterAndSides", "RectangleRounded",
-    "RegularPolygon", "SagittaArc", "SlotCenterPoint", "SlotCenterToCenter",
+    "RegularPolygon", "Rib", "SagittaArc", "SlotCenterPoint", "SlotCenterToCenter",
     "SlotOverall", "SquareFromCenterAndSide", "TangentArc", "TappedHole",
     "Thread", "ThreePointArc", "Torus", "Trapezoid", "Triangle",
 ]
@@ -931,8 +931,19 @@ def _sm_body(ctx, node):
 
 # Enum/option types from the schema; they appear as params, never as geometry.
 _ENUM_TYPES = {
-    "BendPosition", "CornerReliefType", "CornerType", "DimensionPosition",
-    "FlangePosition", "HemType", "MaterialOptions", "ReliefType", "SheetDirection",
+    "BendPosition", "BooleanOp", "CornerReliefType", "CornerType", "DimensionPosition",
+    "EmbossMode", "ExtrudeEndCondition", "FlangeEdge", "FlangePosition", "HemType",
+    "HoleFit", "MaterialOptions", "ReliefType", "SheetDirection", "TextPathAlign",
+}
+
+# Assembly-only / kinematic nodes: anchors, connections and joints position
+# parts relative to each other (and drive motion). Part geometry is already
+# world-placed through the sketch frames, so castiron compiles the parts and
+# intentionally ignores these.
+_ASSEMBLY_ONLY = {
+    "Anchor", "Connection", "JointLimits", "BallJoint", "CylindricalJoint",
+    "PinSlotJoint", "PlanarJoint", "RevoluteJoint", "RigidJoint", "ScrewJoint",
+    "SliderJoint",
 }
 
 # Construction / selection nodes that carry no geometry.
@@ -941,7 +952,7 @@ _IGNORED = {
     "AtDistanceFinderRule", "ContainsPointFinderRule", "InBoxFinderRule", "InDirectionFinderRule",
     "AndFinderRule", "EitherFinderRule", "LengthRangeRule", "RadiusRangeRule", "ParallelToAxisRule",
     "OnFaceRule", "SortByRule", "Color", "BoundingBox", "FixedTranslationConstraint",
-    "AssemblyInterface", "InterfaceGridSpec", "EdgeRef", "EdgeReference",
+    "AssemblyInterface", "InterfaceGridSpec", "EdgeRef", "EdgeReference", "FaceFinder",
 }
 
 
@@ -1078,4 +1089,5 @@ HANDLERS = {
     **{t: _result for t in _RESULT_NODES},
     **{t: _ignore for t in _ENUM_TYPES},
     **{t: _ignore for t in _IGNORED},
+    **{t: _ignore for t in _ASSEMBLY_ONLY},
 }

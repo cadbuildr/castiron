@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cadbuildr.castiron"
+name = "cadbuildr-castiron"
 version = "0.1.0"
 description = "castiron — compile a CADbuildr foundation DAG into geometry via the IronStream Python binding"
 readme = "README.md"
@@ -13,7 +13,7 @@ authors = [{ name = "CADbuildr" }]
 
 # The IronStream Python binding + the foundation library that produces the DAG.
 dependencies = [
-    "cadbuildr.ironstream",
+    "cadbuildr-ironstream",
     "cadbuildr-foundation",
     "svg.path",              # SVGShape path flattening
 ]

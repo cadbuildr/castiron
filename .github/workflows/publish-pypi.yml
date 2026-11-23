@@ -2,7 +2,7 @@ name: Publish to PyPI
 
 # Publishes the package to PyPI when a version tag (vX.Y.Z) is pushed.
 # Uses PyPI Trusted Publishing (OIDC) — no token stored in secrets. Configure the
-# trusted publisher for project "cadbuildr.castiron" at
+# trusted publisher for project "cadbuildr-castiron" at
 # https://pypi.org/manage/account/publishing/ (repo cadbuildr/castiron,
 # workflow publish-pypi.yml, environment pypi).
 

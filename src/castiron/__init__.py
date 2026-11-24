@@ -13,4 +13,4 @@ __all__ = [
     "compile", "compile_meshes", "Compiler", "BuildManifest",
     "NothingToBuildError", "Dag", "DagNode", "Placement",
 ]
-__version__ = "0.1.0"
+__version__ = "0.3.0"

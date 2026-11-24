@@ -139,6 +139,14 @@ KNOWN_GAPS = {
     # patterns + body moves
     # part modification through a connection (needs anchor-resolved placement)
     "PartModifier",
+    # foundation 0.2.21: face/body-selected edits (no face or body identity on a
+    # mesh solid), surface modelling from curves, STEP import, variable
+    # fillets/vertex chamfers and sheet-metal forming
+    "DeleteFace", "MoveFace", "PartingLineDraft", "DeleteBodies", "KeepBodies",
+    "BoundarySurface", "CompositeCurve", "Enclose", "ExtendSurface", "FillSurface",
+    "IntersectionCurve", "IsoparametricCurve", "OffsetSurface", "ProjectedCurve",
+    "ProjectedEdges", "CurvePattern", "ImportStep", "VertexChamfer",
+    "SheetMetalCornerBreak", "SheetMetalFormTool",
     # face-selected features: no face identity on a mesh solid
     "OffsetFace",
     # face-projected features + text along a path

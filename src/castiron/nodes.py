@@ -1384,3 +1384,11 @@ HANDLERS = {
 
 # edge finders resolve to rule dicts (they were metadata before blends existed)
 HANDLERS.update({"EdgeFinder": _edge_finder, **RULE_HANDLERS})
+
+# foundation 0.2.21: enums, kinematic relations and per-point fillet radii carry
+# no geometry of their own
+HANDLERS.update({t: _ignore for t in (
+    "CornerBreakType", "IsoDirection", "SurfaceContinuity",
+    "GearRelation", "LinearRelation", "RackPinionRelation", "ScrewRelation",
+    "FilletRadiusPoint",
+)})

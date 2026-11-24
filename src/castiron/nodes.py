@@ -260,8 +260,11 @@ def _concat_solids(solids):
 
 
 def _circle_of_loop(loop, rel_tol=1e-6):
-    """If a 2D loop is a discretized circle, return (center, radius)."""
-    if len(loop) < 8:
+    """If a 2D loop is a discretized circle, return (center, radius).
+
+    Needs >= 24 vertices: a regular polygon (a 12-facet gem) is equidistant
+    from its centre too, but must stay a polygon. Circles mesh at 64."""
+    if len(loop) < 24:
         return None
     cx = sum(p[0] for p in loop) / len(loop)
     cy = sum(p[1] for p in loop) / len(loop)
@@ -766,7 +769,23 @@ def _sweep(ctx, node):
         placement = None
     twist = math.radians(float(ctx.get_opt(node, "twist", 0.0) or 0.0))
     cut = bool(ctx.get_opt(node, "cut", False) or False)
+    part = ctx.part_frame_of(node) if hasattr(ctx, "part_frame_of") else None
+    if isinstance(part, Placement) and (part.position != (0.0, 0.0, 0.0) or part.quaternion != (1.0, 0.0, 0.0, 0.0)):
+        path = _place_path(path, part)
     return OpResult(sweep_solid(profile, path, placement, twist), cut)
+
+
+def _place_path(path, part: Placement):
+    """Map a part-local 3D path (Point3D-built) into world space."""
+    from .placement import quat_rotate
+
+    pts = [part.to_world(*p) for p in path]
+    if isinstance(path, HelixPath):
+        return HelixPath(
+            pts, part.to_world(*path.center), _norm(quat_rotate(part.quaternion, path.axis)),
+            path.radius, path.pitch, path.height, path.sign, path.turns,
+        )
+    return pts
 
 
 def _helix3d(ctx, node, seg_per_turn=36, max_points=6000):

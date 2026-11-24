@@ -62,6 +62,39 @@ class Compiler:
     def get_list(self, node: DagNode, key: str) -> list[Any]:
         return [self.store[r] for r in node.deps.get(key, [])]
 
+    _PART_TYPES = ("Part", "PartRoot")
+
+    def part_frame_of(self, node: DagNode) -> Any:
+        """The Placement of the part that owns ``node`` (None if unowned).
+
+        Sketch geometry is world-placed through its plane's frame chain, but
+        raw ``Point3D`` geometry (a Helix3D / Spline3D sweep path) is in its
+        part's local frame. Ownership is resolved once: a DFS from each part's
+        operations, not descending into nested parts."""
+        if not hasattr(self, "_owner"):
+            owner: dict[str, str] = {}
+            for pid, pn in self.dag.nodes.items():
+                if pn.type_name not in self._PART_TYPES:
+                    continue
+                frame = pn.deps.get("frame")
+                if not isinstance(frame, str):
+                    continue
+                stack = list(pn.deps.get("operations", []))
+                seen = set()
+                while stack:
+                    nid = stack.pop()
+                    if nid in seen or nid not in self.dag.nodes:
+                        continue
+                    seen.add(nid)
+                    n = self.dag.nodes[nid]
+                    if n.type_name in self._PART_TYPES:
+                        continue
+                    owner.setdefault(nid, frame)
+                    stack.extend(self.dag.dep_ids(n))
+            self._owner = owner
+        fid = self._owner.get(node.id)
+        return self.store.get(fid) if fid else None
+
     def run(self) -> "Compiler":
         for nid in self.dag.topo_order():
             node = self.dag.nodes[nid]

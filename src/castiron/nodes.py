@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import ironstream as ist
 
-from .loft import _cross, _norm, loft_solid, sweep_solid
+from .loft import HelixPath, _cross, _norm, ax2_xdir, loft_solid, sweep_solid
 from .placement import Placement
 
 
@@ -749,36 +749,39 @@ def _loft(ctx, node):
 
 def _sweep(ctx, node):
     profile = _shapes(ctx, node, "profile")[0]  # 2D sketch-local loop
-    path = ctx.get(node, "path")  # Spline3D / Helix3D -> list of 3D control points
+    path = ctx.get(node, "path")  # Spline3D / Helix3D -> list of 3D points
+    placement = ctx.get_opt(node, "sketch", None)
+    if not isinstance(placement, Placement):
+        placement = None
+    twist = math.radians(float(ctx.get_opt(node, "twist", 0.0) or 0.0))
     cut = bool(ctx.get_opt(node, "cut", False) or False)
-    return OpResult(sweep_solid(profile, path), cut)
+    return OpResult(sweep_solid(profile, path, placement, twist), cut)
 
 
-def _helix3d(ctx, node, seg_per_turn=32, max_points=400):
-    cx, cy, cz = ctx.get(node, "center")
+def _helix3d(ctx, node, seg_per_turn=36, max_points=6000):
+    """A helix on gp_Ax3(center, dir), as OCCT/replicad's makeHelix builds it:
+    angle 0 on gp_Ax2's automatic X direction, counter-clockwise about ``dir``
+    (clockwise when left-handed), rising ``pitch`` per turn."""
+    center = tuple(ctx.get(node, "center"))
     axis = _norm(ctx.get(node, "dir"))
     height = float(ctx.get(node, "height"))
     pitch = float(ctx.get(node, "pitch"))
     radius = float(ctx.get(node, "radius"))
     sign = -1.0 if bool(ctx.get_opt(node, "lefthand", False)) else 1.0
-    ref = (0.0, 0.0, 1.0) if abs(axis[2]) < 0.95 else (1.0, 0.0, 0.0)
-    e1 = _norm(_cross(ref, axis))
-    e2 = _norm(_cross(axis, e1))
-    turns = height / pitch if pitch else 1.0
-    # Cap the total point count: a many-turn helix drives a Sweep that is then
-    # boolean'd, and the BSP cost is superlinear in triangle count. This keeps a
-    # 10-turn thread from exploding to tens of thousands of triangles.
-    npts = max(2, min(max_points, int(turns * seg_per_turn)))
+    e1 = ax2_xdir(axis)
+    e2 = _cross(axis, e1)
+    turns = height / pitch if pitch else 0.0
+    npts = max(2, min(max_points, int(math.ceil(turns * seg_per_turn))))
     pts = []
     for i in range(npts + 1):
-        t = turns * i / npts
-        a = sign * 2 * math.pi * t
-        z = height * i / npts
+        f = i / npts
+        a = sign * 2 * math.pi * turns * f
+        z = height * f
         pts.append(tuple(
-            (cx, cy, cz)[k] + radius * (math.cos(a) * e1[k] + math.sin(a) * e2[k]) + z * axis[k]
+            center[k] + radius * (math.cos(a) * e1[k] + math.sin(a) * e2[k]) + z * axis[k]
             for k in range(3)
         ))
-    return pts
+    return HelixPath(pts, center, axis, radius, pitch, height, sign, turns)
 
 
 # --- composite nodes (foundation @expand pattern) ---------------------------

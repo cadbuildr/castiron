@@ -42,6 +42,18 @@ def resample_closed(loop: list[Vec3], n: int) -> list[Vec3]:
     return out
 
 
+def upsample_closed(loop: list[Vec3], n: int) -> list[Vec3]:
+    """Grow a closed loop to ``n`` points by repeatedly splitting its longest
+    edge at the midpoint. Original vertices are kept in order."""
+    pts = list(loop)
+    while len(pts) < n:
+        m = len(pts)
+        k = max(range(m), key=lambda i: _dist(pts[i], pts[(i + 1) % m]))
+        a, b = pts[k], pts[(k + 1) % m]
+        pts.insert(k + 1, tuple((a[c] + b[c]) * 0.5 for c in range(3)))
+    return pts
+
+
 def _newell_normal(loop: list[Vec3]) -> Vec3:
     """Loop normal via Newell's method (robust for non-planar polygons)."""
     nx = ny = nz = 0.0
@@ -80,20 +92,28 @@ def loft_solid(sections: list[list[Vec3]]):
     if len(sections) < 2:
         raise ValueError("loft needs at least two sections")
     n = max(len(s) for s in sections)
-    secs = [resample_closed(s, n) for s in sections]
+    # Keep every section's own vertices (corners of a polygonal profile carry
+    # the shape); only sections with fewer points get extra points, inserted
+    # on their longest edges. Arc-length resampling of all sections cut the
+    # corners off a 4-point thread profile and shrank it ~18x.
+    secs = [s if len(s) == n else upsample_closed(s, n) for s in sections]
 
-    # loft axis: first section centroid -> last section centroid
-    c0 = tuple(sum(p[k] for p in secs[0]) / n for k in range(3))
-    c1 = tuple(sum(p[k] for p in secs[-1]) / n for k in range(3))
-    axis = tuple(c1[k] - c0[k] for k in range(3))
-    if sum(a * a for a in axis) < 1e-18:
-        axis = _newell_normal(secs[0])  # closed/flat loft: use the loop plane
-
-    # orient every section CCW about the axis so wall quads all face outward
-    secs = [
-        s if sum(_newell_normal(s)[k] * axis[k] for k in range(3)) >= 0 else s[::-1]
-        for s in secs
-    ]
+    # Orient each section CCW about its *local* loft direction (towards the
+    # next section), so wall quads face outward even when the spine curls
+    # back on itself (a helix of non-integer turns, a U-bend). A reversed
+    # section keeps its first vertex, so vertex j still pairs with vertex j
+    # of its neighbours.
+    cents = [tuple(sum(p[k] for p in s) / len(s) for k in range(3)) for s in secs]
+    oriented = []
+    for i, sec in enumerate(secs):
+        a_, b_ = (cents[i], cents[i + 1]) if i + 1 < len(secs) else (cents[i - 1], cents[i])
+        d = tuple(b_[k] - a_[k] for k in range(3))
+        if sum(x * x for x in d) < 1e-18:
+            d = _newell_normal(secs[0])  # coincident centroids: use the loop plane
+        if sum(_newell_normal(sec)[k] * d[k] for k in range(3)) < 0:
+            sec = [sec[0]] + sec[:0:-1]
+        oriented.append(sec)
+    secs = oriented
 
     verts: list[Vec3] = []
     starts: list[int] = []
@@ -136,27 +156,6 @@ def loft_solid(sections: list[list[Vec3]]):
     return ist.solid_from_mesh(vflat, tflat)
 
 
-def _frames_along_path(path: list[Vec3]):
-    """A rotation-minimizing-ish frame (origin, x-axis, y-axis) per path point."""
-    m = len(path)
-    tangents = []
-    for i in range(m):
-        a = path[max(i - 1, 0)]
-        b = path[min(i + 1, m - 1)]
-        t = tuple(b[k] - a[k] for k in range(3))
-        ln = math.sqrt(sum(c * c for c in t)) or 1.0
-        tangents.append(tuple(c / ln for c in t))
-    frames = []
-    up = (0.0, 0.0, 1.0)
-    for i, tan in enumerate(tangents):
-        ref = up if abs(sum(tan[k] * up[k] for k in range(3))) < 0.95 else (1.0, 0.0, 0.0)
-        x = _cross(ref, tan)
-        x = _norm(x)
-        y = _norm(_cross(tan, x))
-        frames.append((path[i], x, y))
-    return frames
-
-
 def _cross(a, b):
     return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
 
@@ -166,12 +165,166 @@ def _norm(v):
     return tuple(c / ln for c in v)
 
 
-def sweep_solid(profile2d: list[tuple[float, float]], path: list[Vec3]):
-    """Sweep a 2D profile along a 3D path, orienting it to the path tangent."""
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _mul(a, s):
+    return (a[0] * s, a[1] * s, a[2] * s)
+
+
+def _rotate(v, axis, ang):
+    """Rodrigues: rotate vector ``v`` about unit ``axis`` by ``ang`` radians."""
+    c, s = math.cos(ang), math.sin(ang)
+    kxv = _cross(axis, v)
+    kdv = _dot(axis, v)
+    return tuple(v[i] * c + kxv[i] * s + axis[i] * kdv * (1 - c) for i in range(3))
+
+
+def _any_perp(v):
+    ref = (1.0, 0.0, 0.0) if abs(v[0]) < 0.9 else (0.0, 1.0, 0.0)
+    return _cross(v, ref)
+
+
+def _min_rotation(a, b):
+    """(axis, angle) of the smallest rotation taking unit ``a`` onto unit ``b``."""
+    ax = _cross(a, b)
+    sn = math.sqrt(_dot(ax, ax))
+    cs = max(-1.0, min(1.0, _dot(a, b)))
+    if sn < 1e-12:
+        return None if cs > 0 else (_norm(_any_perp(a)), math.pi)
+    return (_mul(ax, 1.0 / sn), math.atan2(sn, cs))
+
+
+def ax2_xdir(v):
+    """The X direction OCCT's ``gp_Ax2(P, V)`` picks for main direction ``V``,
+    so a helix built on ``gp_Ax3(center, dir)`` starts where OCCT's does."""
+    a, b, c = v
+    aa, ba, ca = abs(a), abs(b), abs(c)
+    if ba <= aa and ba <= ca:
+        x = (-c, 0.0, a) if aa > ca else (c, 0.0, -a)
+    elif aa <= ba and aa <= ca:
+        x = (0.0, -c, b) if ba > ca else (0.0, c, -b)
+    else:
+        x = (-b, a, 0.0) if aa > ba else (b, -a, 0.0)
+    return _norm(x)
+
+
+class HelixPath(list):
+    """Sampled helix points that also remember the analytic helix, so a Sweep
+    can move its profile by the exact helical motion (what OCCT's Frenet law
+    reduces to on a helix) instead of frames estimated from the samples."""
+
+    def __init__(self, pts, center, axis, radius, pitch, height, sign, turns):
+        super().__init__(pts)
+        self.center, self.axis, self.radius = center, axis, radius
+        self.pitch, self.height, self.sign, self.turns = pitch, height, sign, turns
+
+    def tangent0(self):
+        e1 = _norm(_sub(self[0], self.center))
+        e2 = _cross(self.axis, e1)
+        rise = self.pitch if self.turns else self.height
+        return _norm(_add(_mul(e2, self.sign * 2 * math.pi * self.radius), _mul(self.axis, rise)))
+
+
+def _rmf(path):
+    """Rotation-minimising frames (double reflection, Wang et al. 2008) along a
+    polyline: [(tangent, r)] per point. OCCT's corrected-Frenet law is a
+    rotation-minimising frame too."""
+    m = len(path)
+    tans = []
+    for i in range(m):
+        a = path[max(i - 1, 0)]
+        b = path[min(i + 1, m - 1)]
+        tans.append(_norm(_sub(b, a)))
+    r = _norm(_any_perp(tans[0]))
+    out = [(tans[0], r)]
+    for i in range(m - 1):
+        v1 = _sub(path[i + 1], path[i])
+        c1 = _dot(v1, v1)
+        if c1 < 1e-24:
+            out.append((tans[i + 1], r))
+            continue
+        rl = _sub(r, _mul(v1, 2.0 / c1 * _dot(v1, r)))
+        tl = _sub(tans[i], _mul(v1, 2.0 / c1 * _dot(v1, tans[i])))
+        v2 = _sub(tans[i + 1], tl)
+        c2 = _dot(v2, v2)
+        r = rl if c2 < 1e-24 else _sub(rl, _mul(v2, 2.0 / c2 * _dot(v2, rl)))
+        r = _norm(r)
+        out.append((tans[i + 1], r))
+    return out
+
+
+def sweep_solid(profile2d, path, placement=None, twist=0.0):
+    """Sweep a 2D sketch profile along a 3D path the way the OCCT kernel does
+    (replicad ``genericSweep`` with ``forceProfileSpineOthogonality``):
+
+    * the profile is drawn on its sketch plane's axes, re-origined at the
+      path's start point;
+    * it is rotated about that point so its plane is orthogonal to the path
+      tangent (OCCT's ``WithCorrection``);
+    * every section is the start section moved by the path's frame law: the
+      exact helical motion for a ``HelixPath``, rotation-minimising frames for
+      any other polyline.
+    """
+    from .placement import quat_rotate
+
+    if placement is not None:
+        q = placement.quaternion
+        xd, nd = quat_rotate(q, (1.0, 0.0, 0.0)), quat_rotate(q, (0.0, 0.0, 1.0))
+    else:
+        xd, nd = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    yd = _cross(nd, xd)
+    origin = tuple(path[0])
+    base = [_add(origin, _add(_mul(xd, px), _mul(yd, py))) for (px, py) in profile2d]
+
+    helix = isinstance(path, HelixPath)
+    frames = None if helix else _rmf(path)
+    t0 = path.tangent0() if helix else frames[0][0]
+    n0 = nd if _dot(nd, t0) >= 0 else _mul(nd, -1.0)
+    rot = _min_rotation(_norm(n0), t0)
+    if rot is not None:
+        axis, ang = rot
+        base = [_add(origin, _rotate(_sub(p, origin), axis, ang)) for p in base]
+
     sections = []
-    for origin, x, y in _frames_along_path(path):
-        sections.append([
-            tuple(origin[k] + px * x[k] + py * y[k] for k in range(3))
-            for (px, py) in profile2d
-        ])
+    if helix:
+        k = path.axis
+        last = len(path) - 1
+        for i in range(len(path)):
+            f = i / last
+            ang = path.sign * 2 * math.pi * path.turns * f
+            dz = path.height * f
+            tw = twist * f
+            sec = []
+            for p in base:
+                if tw:
+                    p = _add(origin, _rotate(_sub(p, origin), t0, tw))
+                rel = _sub(p, path.center)
+                sec.append(_add(path.center, _add(_rotate(rel, k, ang), _mul(k, dz))))
+            sections.append(sec)
+    else:
+        t_0, r_0 = frames[0]
+        b_0 = _cross(t_0, r_0)
+        local = []
+        for p in base:
+            d = _sub(p, origin)
+            local.append((_dot(d, r_0), _dot(d, b_0), _dot(d, t_0)))
+        last = max(1, len(frames) - 1)
+        for i, (t, r) in enumerate(frames):
+            b = _cross(t, r)
+            tw = twist * i / last
+            c, s = math.cos(tw), math.sin(tw)
+            sections.append([
+                _add(tuple(path[i]), _add(_add(_mul(r, u * c - v * s), _mul(b, u * s + v * c)), _mul(t, w)))
+                for (u, v, w) in local
+            ])
     return loft_solid(sections)

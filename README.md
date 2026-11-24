@@ -50,28 +50,54 @@ Adding a node type = writing one handler and registering it in `HANDLERS`.
 
 ## Status
 
-Handlers exist for every foundation node type. Against the kernel-truck fixture
-corpus, **64/70 compile to geometry** and 5 more are legitimately sketch-only or
-empty designs (no solid) — 69/70 accounted for.
+**OCCT parity.** On the kernel_compare benchmark (every buildable design in the
+CADbuildr corpus: stdlib catalog, Prusa i3, Sesame robot, LEGO, playground,
+jewellery, …), castiron matches the OCCT kernel on **111 of 112** designs
+(IoU ≥ 0.95, volume within 2 %, bbox within 1 %). It is about 6× faster than
+OCCT (geometric mean of warm compile times) and uses ~25× less memory (median
+peak RSS 37 MB vs 895 MB). The one exception is a lathed-ellipse ring: OCCT's own
+mesh is 2 % under the exact volume, while castiron is within 0.3 % of exact.
 
 Covered: parameters; points/lines/arcs/splines/3D points; closed shapes
 (polygon, rectangle, square, hexagon, circle, ellipse, custom); sketches /
-planes / frames (quaternion placement); `Extrusion`, `Hole`, `Lathe`, `Sphere`;
-`Mirror`, `Scale`, `Shell`, `Stitch`; `Loft` / `SurfaceLoft` / `Sweep` /
-`MultiSectionSweep` / `Helix3D` (mesh skinning via `ironstream.solid_from_mesh`);
-sheet-metal base + edge flange (other bends forward the flange, matching the Rust
-reference); `Assembly` (multi-part, frame-chained placement); and `SVGShape`
-(path flattening).
+planes / frames (quaternion placement); `Extrusion` (with taper and holes),
+`Hole`, `Lathe`, `Sphere`; `Mirror`, `Scale`, `Shell`, `Stitch`; `Loft` /
+`SurfaceLoft` / `Sweep` / `MultiSectionSweep`; `Helix3D` threads; `Fillet` /
+`Chamfer` with `EdgeFinder` rules; `LinearPattern` / `PolarPattern` / `MoveBody`
+/ `BooleanOperation`; planar / extruded / revolved / ruled surfaces;
+sheet-metal base + edge flange; `Assembly` (multi-part, frame-chained
+placement); `SVGShape` and SVG `<text>` (with the `[svg]` extra).
+
+How OCCT semantics are matched where it matters:
+
+- **Sweep** places the profile on its sketch plane at the path start, corrects
+  it orthogonal to the tangent and moves it by the exact helical motion (OCCT
+  `genericSweep` with Frenet on a helix). A helix starts on `gp_Ax2`'s automatic
+  X axis like `makeHelix`. Paths built from `Point3D` are mapped by their part's
+  frame.
+- **Solid modifiers** (`Fillet`, `Chamfer`, `Shell`) replace the part's running
+  solid, as in the OCCT kernel's `PartRoot`.
+- **Tessellation** follows OCCT's angular step (64 segments per full circle,
+  arcs in proportion to their sweep). The kernel re-merges coplanar boolean
+  fragments, so the median triangle count is ~1.4× OCCT's.
 
 Approximations / gaps, in order of fidelity cost:
 
-- **Fillet / Chamfer / Draft / FullRound** forward the solid unchanged — the
-  IronStream kernel exposes no edge-blend op yet (neither does the Rust reference).
+- **Fillet / Chamfer** are geometric, because IronStream solids have no B-rep
+  edges. Sharp edges are found on the mesh and a swept section is cut per
+  convex straight or circular edge. Where filleted edges meet, the corner is the
+  intersection of the roll-offs, not OCCT's spherical vertex patch (a fully
+  rounded cube is within 1 % of exact). Concave edges, partial arcs and
+  freeform edges are not blended. `OnFaceRule` is a no-op, as in the OCCT kernel.
+- **Draft / FullRound** forward the solid unchanged.
 - **Sheet-metal bends** (Tab/Hem/Miter/Unfold) forward the base flange; no bend
   deformation.
-- **SVGShape** flattens `<path>` data as a single loop (multi-subpath holes and
-  self-intersecting art are approximate); SVG `<text>` needs a font engine and is
-  unsupported.
+- **Face-selected features** (`OffsetFace`, `Emboss`, `Wrap`, `TextOnPath`,
+  `Rip`, the sheet-metal face ops) and `PartModifier` have no handler. They
+  need face identity, which a mesh solid does not carry. See `KNOWN_GAPS` in
+  `tests/test_compile.py`.
+- **Threads** come out at about 5× OCCT's triangle count: helical facets are
+  fragmented by the shank's facets in the mesh boolean.
 
 ## Development
 

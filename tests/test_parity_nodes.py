@@ -106,3 +106,59 @@ def test_linear_and_polar_pattern_and_move_body():
     for op, want in (("SUBTRACT", 64 - 8), ("UNION", 64 + 56), ("INTERSECT", 8)):
         r = N._boolean_operation(Ctx({"target": big, "tools": [tool], "op": op}), None)
         assert r.solid.volume() == pytest.approx(want, rel=1e-6), op
+
+
+def _box_part(fillet=None, chamfer=None, finder=None, cyl=False):
+    from cadbuildr.foundation import Circle
+
+    def b(self):
+        s = Sketch(self.xy())
+        shape = Circle(s.origin, 5.0) if cyl else _poly(s, [(0, 0), (10, 0), (10, 10), (0, 10)])
+        e = Extrusion(shape, 10.0)
+        self.add_operation(e)
+        if fillet:
+            self.add_operation(M.Fillet(e, fillet, finder))
+        if chamfer:
+            self.add_operation(M.Chamfer(e, chamfer, finder))
+
+    return _part(b)
+
+
+def _finder(rule):
+    return M.EdgeFinder(rule)
+
+
+def test_fillet_vertical_box_edges():
+    # 4 vertical edges, r=1: each removes (1 - pi/4) * 10
+    vol, _ = _volume(_box_part(fillet=1.0, finder=_finder(M.ParallelToAxisRule("Z"))))
+    assert vol == pytest.approx(1000 - 4 * (1 - math.pi / 4) * 10, rel=2e-3)
+
+
+def test_chamfer_one_edge_by_box():
+    # the vertical edge at (10, 10): a 1 x 1 right triangle along 10 mm
+    rule = M.AndFinderRule([M.ParallelToAxisRule("Z"), M.InBoxFinderRule(
+        M.Point3D(9.5, 9.5, -1.0), M.Point3D(10.5, 10.5, 11.0))])
+    vol, meshes = _volume(_box_part(chamfer=1.0, finder=_finder(rule)))
+    assert vol == pytest.approx(1000 - 0.5 * 10, rel=1e-3)
+
+
+def test_fillet_all_box_edges_rounds_everything():
+    vol, meshes = _volume(_box_part(fillet=1.0))
+    # exact rounded box (Minkowski of an 8 mm cube and r=1): a^3 + 6a^2 r + 3 pi a r^2 + 4/3 pi r^3.
+    # Corners here are edge roll-off intersections, not sphere octants: ~1 %.
+    a, r = 8.0, 1.0
+    exact = a**3 + 6 * a * a * r + 3 * math.pi * a * r * r + 4 / 3 * math.pi * r**3
+    assert vol == pytest.approx(exact, rel=1e-2)
+    lo, hi = _bounds(meshes)
+    assert lo == pytest.approx((0, 0, 0), abs=1e-6) and hi == pytest.approx((10, 10, 10), abs=1e-6)
+
+
+def test_fillet_cylinder_top_circle():
+    # r=1 fillet on both circular edges of an r=5 cylinder:
+    # removed area (1 - pi/4) revolved at its centroid radius
+    a = 1 - math.pi / 4
+    xc = (10 - 3 * math.pi) / (12 - 3 * math.pi)  # centroid offset from the corner
+    removed = 2 * math.pi * (5 - xc) * a
+    vol, _ = _volume(_box_part(fillet=1.0, cyl=True, finder=_finder(M.IsCircleRule())))
+    full = math.pi * 25 * 10 * (64 * math.sin(2 * math.pi / 64) / (2 * math.pi))
+    assert vol == pytest.approx(full - 2 * removed, rel=1e-2)

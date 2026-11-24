@@ -29,10 +29,18 @@ from .placement import Placement
 
 @dataclass
 class OpResult:
-    """A solid produced by one operation, plus whether it is subtractive."""
+    """A solid produced by one operation, plus whether it is subtractive.
+
+    ``replaces`` marks a solid modifier (Fillet, Chamfer, Shell, Draft,
+    FullRound): as in the OCCT kernel's PartRoot, its result *replaces* the
+    part's running solid instead of being fused onto it (fusing a filleted box
+    with the sharp box gives the sharp box back). A modifier with no ``solid``
+    dep carries ``modify`` and is applied to the running solid."""
 
     solid: "ist.Solid"
     cut: bool = False
+    replaces: bool = False
+    modify: object = None
 
 
 @dataclass
@@ -485,7 +493,7 @@ def _shell(ctx, node):
     if min(dx, dy, dz) <= 0:
         return child  # too thin to hollow
     inner = ist.make_box(ist.Pnt(mnx + t, mny + t, mnz + t), dx, dy, dz)  # open top
-    return OpResult(ist.cut(child.solid, inner), child.cut)
+    return OpResult(ist.cut(child.solid, inner), child.cut, replaces=True)
 
 
 def _stitch(ctx, node):
@@ -980,6 +988,74 @@ def _ruled_surface(ctx, node):
     return OpResult(_open_mesh(_surface_strip(a + [a[0]], b + [b[0]])), False)
 
 
+
+
+# --- edge finders + blends ---------------------------------------------------
+# Finder nodes compile to plain rule dicts that castiron.blend.select reads.
+
+
+def _rule(kind, **kw):
+    return {"kind": kind, **kw}
+
+
+def _edge_finder(ctx, node):
+    return ctx.get(node, "rule")
+
+
+def _num(ctx, node, k, d=0.0):
+    v = ctx.get_opt(node, k, d)
+    return float(v) if v is not None else d
+
+
+RULE_HANDLERS = {
+    "ParallelToAxisRule": lambda c, n: _rule("parallelToAxis", axis=str(c.get(n, "axis"))),
+    "InDirectionFinderRule": lambda c, n: _rule("inDirection", direction=tuple(c.get(n, "direction"))),
+    "AtAngleFinderRule": lambda c, n: _rule("atAngle", angle=_num(c, n, "angle"), direction=tuple(c.get(n, "direction"))),
+    "IsCircleRule": lambda c, n: _rule("isCircle"),
+    "OfTypeRule": lambda c, n: _rule("ofType", type_name=str(c.get(n, "type_name"))),
+    "InPlaneFinderRule": lambda c, n: _rule(
+        "inPlane", origin=c.get(n, "plane").to_world(0.0, 0.0, 0.0), normal=c.get(n, "plane").normal(),
+        distance=_num(c, n, "distance")),
+    "ContainsPointFinderRule": lambda c, n: _rule("containsPoint", point=tuple(c.get(n, "point"))),
+    "AtDistanceFinderRule": lambda c, n: _rule("atDistance", distance=_num(c, n, "distance"), point=tuple(c.get(n, "point"))),
+    "InBoxFinderRule": lambda c, n: _rule("inBox", corner1=tuple(c.get(n, "corner1")), corner2=tuple(c.get(n, "corner2"))),
+    "LengthRangeRule": lambda c, n: _rule("lengthRange", min=_num(c, n, "min"), max=_num(c, n, "max")),
+    "RadiusRangeRule": lambda c, n: _rule("radiusRange", min=_num(c, n, "min"), max=_num(c, n, "max")),
+    "AndFinderRule": lambda c, n: _rule("and", rules=c.get_list(n, "rules")),
+    "EitherFinderRule": lambda c, n: _rule("either", rules=c.get_list(n, "rules")),
+    "OnFaceRule": lambda c, n: _rule("onFace"),
+    "SortByRule": lambda c, n: _rule(
+        "sortBy", rule=c.get(n, "rule"), by=str(c.get(n, "by")),
+        take=str(c.get_opt(n, "take", "FIRST") or "FIRST"), n=int(c.get_opt(n, "n", 1) or 1)),
+}
+
+
+def _blend_handler(mode):
+    def handler(ctx, node):
+        from .blend import blend, find_edges, select
+
+        size = float(ctx.get(node, "radius"))
+        size2 = None
+        if mode == "chamfer":
+            d2 = ctx.get_opt(node, "distance2", None)
+            ang = ctx.get_opt(node, "angle_deg", None)
+            if d2 is not None:
+                size2 = float(d2)
+            elif ang is not None:
+                size2 = size * math.tan(math.radians(float(ang)))
+        rule = ctx.get_opt(node, "edge_finder", None)
+
+        def apply(solid):
+            edges = select(find_edges(solid), rule if isinstance(rule, dict) else None)
+            return blend(solid, edges, size, mode, size2).solid
+
+        base = ctx.get_opt(node, "solid", None)
+        if isinstance(base, OpResult):
+            return OpResult(apply(base.solid), base.cut, replaces=True)
+        return OpResult(None, False, replaces=True, modify=apply)
+
+    return handler
+
 # --- composite nodes (foundation @expand pattern) ---------------------------
 # Many foundation convenience types carry a `result` dep pointing at the
 # primitive node they expand to (Box -> Extrusion, Torus -> Lathe,
@@ -1165,6 +1241,13 @@ def _part(ctx, node):
     i = 0
     n = len(ops)
     while i < n:
+        if ops[i].replaces:
+            if ops[i].solid is not None:
+                solid = ops[i].solid
+            elif ops[i].modify is not None and solid is not None:
+                solid = ops[i].modify(solid)
+            i += 1
+            continue
         cut = ops[i].cut
         # Batch a run of consecutive same-direction ops into ONE boolean:
         # A ∪ (B ∪ C) and A \ (B ∪ C) both equal the sequential form, but the
@@ -1173,7 +1256,7 @@ def _part(ctx, node):
         # one and avoids the mesh-fragmentation blowup.
         j = i
         tools = []
-        while j < n and ops[j].cut == cut:
+        while j < n and ops[j].cut == cut and not ops[j].replaces:
             tools.append(ops[j].solid)
             j += 1
         combined = tools[0] if len(tools) == 1 else ist.fuse_all(tools)
@@ -1252,8 +1335,8 @@ HANDLERS = {
     "RuledSurface": _ruled_surface,
     "Helix3D": _helix3d,
     # not modelled by the reference kernel -> forward the solid unchanged
-    "Fillet": _passthrough_solid,
-    "Chamfer": _passthrough_solid,
+    "Fillet": _blend_handler("fillet"),
+    "Chamfer": _blend_handler("chamfer"),
     "Draft": _passthrough_solid,
     "FullRound": _passthrough_solid,
     "Thicken": _sm_passthrough,
@@ -1298,3 +1381,6 @@ HANDLERS = {
     **{t: _ignore for t in _IGNORED},
     **{t: _ignore for t in _ASSEMBLY_ONLY},
 }
+
+# edge finders resolve to rule dicts (they were metadata before blends existed)
+HANDLERS.update({"EdgeFinder": _edge_finder, **RULE_HANDLERS})

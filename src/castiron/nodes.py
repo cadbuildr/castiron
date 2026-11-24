@@ -118,7 +118,17 @@ def _circumcenter(a, b, c):
     return (ux, uy)
 
 
-def _arc(ctx, node, segments=24):
+# OCCT (kernel-api: deflection 1, angular 0.2) meshes a full circle with ~64
+# segments at every radius below ~800 mm, so arcs use the same angular step:
+# segments in proportion to the sweep, not a fixed count.
+ANGULAR_STEP = 2 * math.pi / 64
+
+
+def arc_segments(sweep: float) -> int:
+    return max(2, int(math.ceil(abs(sweep) / ANGULAR_STEP - 1e-9)))
+
+
+def _arc(ctx, node, segments=None):
     """3-point arc (start ``p1``, through ``p2``, end ``p3``) -> polyline."""
     p1, p2, p3 = ctx.get(node, "p1"), ctx.get(node, "p2"), ctx.get(node, "p3")
     c = _circumcenter(p1, p2, p3)
@@ -130,6 +140,7 @@ def _arc(ctx, node, segments=24):
     a1 = ang(p1)
     d13, d12 = ccw(ang(p3) - a1), ccw(ang(p2) - a1)
     sweep = d13 if d12 <= d13 else d13 - 2 * math.pi  # pick the arc passing p2
+    segments = segments or arc_segments(sweep)
     return [
         (c[0] + r * math.cos(a1 + sweep * i / segments),
          c[1] + r * math.sin(a1 + sweep * i / segments))
@@ -784,6 +795,172 @@ def _helix3d(ctx, node, seg_per_turn=36, max_points=6000):
     return HelixPath(pts, center, axis, radius, pitch, height, sign, turns)
 
 
+
+# --- body transforms / patterns / booleans ----------------------------------
+# foundation expands these before the DAG normally reaches a kernel (the OCCT
+# kernel-api has no handler for them), but a DAG that keeps them compiles here
+# with the semantics of foundation's own expansion (interference.py).
+
+
+def _vec3(ctx, node, key, default):
+    v = ctx.get_opt(node, key, None)
+    return tuple(float(c) for c in v) if v is not None else default
+
+
+def _rot_trsf(origin, axis, angle_rad):
+    ax = _norm(axis)
+    return ist.Trsf.rotation(ist.Ax1(ist.Pnt(*origin), ist.Pnt(*ax)), angle_rad)
+
+
+def _union_all(solids):
+    return solids[0] if len(solids) == 1 else ist.fuse_all(solids)
+
+
+def _linear_pattern(ctx, node):
+    seed: OpResult = ctx.get(node, "shape")
+    d = _norm(_vec3(ctx, node, "direction", (1.0, 0.0, 0.0)))
+    if d == (0.0, 0.0, 0.0):
+        raise UnsupportedNodeError("LinearPattern with a zero direction")
+    step = float(ctx.get(node, "spacing"))
+    count = max(int(ctx.get(node, "count")), 1)
+    copies = [
+        ist.transform(seed.solid, ist.Trsf.translation(ist.Pnt(*_vscale(d, step * i))))
+        for i in range(count)
+    ]
+    return OpResult(_union_all(copies), seed.cut)
+
+
+def _polar_pattern(ctx, node):
+    seed: OpResult = ctx.get(node, "shape")
+    count = max(int(ctx.get(node, "count")), 1)
+    angle = float(ctx.get_opt(node, "angle", 360.0) or 360.0)
+    full = abs(angle - 360.0) < 1e-9
+    step = angle / count if full else angle / max(count - 1, 1)
+    origin = _vec3(ctx, node, "axis_origin", (0.0, 0.0, 0.0))
+    axis = _vec3(ctx, node, "axis_direction", (0.0, 0.0, 1.0))
+    copies = [
+        ist.transform(seed.solid, _rot_trsf(origin, axis, math.radians(step * i)))
+        for i in range(count)
+    ]
+    return OpResult(_union_all(copies), seed.cut)
+
+
+def _move_body(ctx, node):
+    seed: OpResult = ctx.get(node, "shape")
+    rot = _rot_trsf(
+        _vec3(ctx, node, "rotation_origin", (0.0, 0.0, 0.0)),
+        _vec3(ctx, node, "rotation_axis", (0.0, 0.0, 1.0)),
+        math.radians(float(ctx.get_opt(node, "rotation_angle", 0.0) or 0.0)),
+    )
+    t = ist.Trsf.translation(ist.Pnt(*_vec3(ctx, node, "translation", (0.0, 0.0, 0.0))))
+    return OpResult(ist.transform(seed.solid, rot.then(t)), seed.cut)
+
+
+def _boolean_operation(ctx, node):
+    target: OpResult = ctx.get(node, "target")
+    tools = [t.solid for t in ctx.get_list(node, "tools") if isinstance(t, OpResult)]
+    kind = str(ctx.get_opt(node, "op", "SUBTRACT") or "SUBTRACT").upper().split(".")[-1]
+    if not tools:
+        return OpResult(target.solid, target.cut)
+    tool = _union_all(tools)
+    if kind == "UNION":
+        out = ist.fuse(target.solid, tool)
+    elif kind == "INTERSECT":
+        out = ist.common(target.solid, tool)
+    else:
+        out = ist.cut(target.solid, tool)
+    return OpResult(out, target.cut)
+
+
+# --- open surfaces ------------------------------------------------------------
+# Surface bodies are open triangle meshes (no volume); they render, and Thicken
+# / Stitch consume them.
+
+
+def _open_mesh(tris):
+    verts, idx = [], []
+    for t in tris:
+        for p in t:
+            idx.append(len(verts) // 3)
+            verts.extend(p)
+    return ist.solid_from_mesh(verts, idx)
+
+
+def _surface_strip(a, b):
+    """Triangles of the ruled strip between two point rows of equal length."""
+    out = []
+    for i in range(len(a) - 1):
+        out.append((a[i], a[i + 1], b[i + 1]))
+        out.append((a[i], b[i + 1], b[i]))
+    return out
+
+
+def _section_pts(ctx, node, key):
+    shape = ctx.get(node, key)
+    if isinstance(shape, Loops):
+        shape = shape.loops[0]
+    return list(shape)
+
+
+def _planar_surface(ctx, node):
+    loop = _section_pts(ctx, node, "shape")
+    pl = ctx.get_opt(node, "sketch", None) or Placement()
+    face = ist.make_face(_loop_to_wire(pl, loop))
+    n = pl.normal()
+    m = ist.make_prism(face, ist.Pnt(*n)).mesh()
+    # keep the base cap only (the triangles lying in the sketch plane), wound
+    # about +normal: an open, single-sided planar patch
+    v = m.vertices_flat()
+    t = m.triangles_flat()
+    o = pl.to_world(0.0, 0.0, 0.0)
+    on_plane = lambda p: abs(sum((p[i] - o[i]) * n[i] for i in range(3))) < 1e-6
+    tris = []
+    for k in range(0, len(t), 3):
+        a, b, c = (tuple(v[3 * t[k + j]: 3 * t[k + j] + 3]) for j in range(3))
+        if on_plane(a) and on_plane(b) and on_plane(c):
+            tris.append((a, c, b))  # base cap faces -normal; flip it
+    return OpResult(_open_mesh(tris), False)
+
+
+def _extruded_surface(ctx, node):
+    loop = _section_pts(ctx, node, "shape")
+    pl = ctx.get_opt(node, "sketch", None) or Placement()
+    dist = float(ctx.get(node, "distance"))
+    closed = list(loop) + [loop[0]]
+    a = [pl.to_world(x, y, 0.0) for (x, y) in closed]
+    b = [pl.to_world(x, y, dist) for (x, y) in closed]
+    return OpResult(_open_mesh(_surface_strip(a, b)), False)
+
+
+def _revolved_surface(ctx, node, segments=64):
+    loop = _section_pts(ctx, node, "shape")
+    pl = ctx.get_opt(node, "sketch", None) or Placement()
+    _, loc, d = ctx.get(node, "axis")
+    ang = math.radians(float(ctx.get_opt(node, "angle", 360.0) or 360.0))
+    from .loft import _rotate, _sub, _add
+    ax = _norm(d)
+    row0 = [pl.to_world(x, y, 0.0) for (x, y) in list(loop) + [loop[0]]]
+    n = max(2, int(math.ceil(segments * abs(ang) / (2 * math.pi))))
+    rows = [[_add(loc, _rotate(_sub(p, loc), ax, ang * k / n)) for p in row0] for k in range(n + 1)]
+    tris = []
+    for k in range(n):
+        tris += _surface_strip(rows[k], rows[k + 1])
+    return OpResult(_open_mesh(tris), False)
+
+
+def _ruled_surface(ctx, node):
+    from .loft import upsample_closed
+    s0 = _section_pts(ctx, node, "start")
+    s1 = _section_pts(ctx, node, "end")
+    p0 = ctx.get_opt(node, "start_sketch", None) or Placement()
+    p1 = ctx.get_opt(node, "end_sketch", None) or Placement()
+    a = [p0.to_world(x, y, 0.0) for (x, y) in s0]
+    b = [p1.to_world(x, y, 0.0) for (x, y) in s1]
+    n = max(len(a), len(b))
+    a, b = upsample_closed(a, n), upsample_closed(b, n)
+    return OpResult(_open_mesh(_surface_strip(a + [a[0]], b + [b[0]])), False)
+
+
 # --- composite nodes (foundation @expand pattern) ---------------------------
 # Many foundation convenience types carry a `result` dep pointing at the
 # primitive node they expand to (Box -> Extrusion, Torus -> Lathe,
@@ -1046,6 +1223,14 @@ HANDLERS = {
     "SurfaceLoft": _loft,
     "MultiSectionSweep": _loft,
     "Sweep": _sweep,
+    "LinearPattern": _linear_pattern,
+    "PolarPattern": _polar_pattern,
+    "MoveBody": _move_body,
+    "BooleanOperation": _boolean_operation,
+    "PlanarSurface": _planar_surface,
+    "ExtrudedSurface": _extruded_surface,
+    "RevolvedSurface": _revolved_surface,
+    "RuledSurface": _ruled_surface,
     "Helix3D": _helix3d,
     # not modelled by the reference kernel -> forward the solid unchanged
     "Fillet": _passthrough_solid,

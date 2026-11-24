@@ -137,11 +137,10 @@ def test_lathe_profile_straddling_axis():
 # (see castiron.nodes._ASSEMBLY_ONLY).
 KNOWN_GAPS = {
     # patterns + body moves
-    "LinearPattern", "PolarPattern", "MoveBody",
-    # booleans between bodies + part modification through a connection
-    "BooleanOperation", "PartModifier",
-    # surface modelling
-    "PlanarSurface", "ExtrudedSurface", "RevolvedSurface", "RuledSurface", "OffsetFace",
+    # part modification through a connection (needs anchor-resolved placement)
+    "PartModifier",
+    # face-selected features: no face identity on a mesh solid
+    "OffsetFace",
     # face-projected features + text along a path
     "Emboss", "Wrap", "TextOnPath",
     # sheet metal
